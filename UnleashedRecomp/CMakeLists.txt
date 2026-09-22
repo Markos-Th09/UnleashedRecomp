@@ -90,6 +90,10 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_compile_definitions(SDL_MAIN_HANDLED)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_compile_definitions(UNLEASHED_RECOMP_IOS)
+endif()
+
 set(UNLEASHED_RECOMP_PRECOMPILED_HEADERS
     "stdafx.h"
 )
@@ -398,6 +402,7 @@ elseif(APPLE)
             MACOSX_BUNDLE_ICON_FILE "game_icon.icns"
             MACOSX_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
         )
+
         # Linking with MoltenVK directly would prevent using the system Vulkan loader to load with debug layers.
         # Instead, copy the MoltenVK dylib to the app bundle along with an ICD file for the loader to find it.
         # In the event the loader is not installed, the MoltenVK dylib can still be picked up directly in the app bundle.
@@ -542,13 +547,15 @@ function(compile_shader FILE_PATH TARGET_NAME)
         # "iphoneos" for device builds, and defaults to the macOS SDK otherwise.
         if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
             set(_metal_sdk iphoneos)
+            set(_metal_sdk_version_arg -mios-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET})
         else()
             set(_metal_sdk macosx)
+            set(_metal_sdk_version_arg -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET})
         endif()
 
         add_custom_command(
             OUTPUT ${MSL_FILE_PATH}.ir
-            COMMAND ${XCRUN_TOOL} -sdk ${_metal_sdk} metal -o ${MSL_FILE_PATH}.ir -c ${MSL_FILE_PATH} -D__air__ -frecord-sources -gline-tables-only
+            COMMAND ${XCRUN_TOOL} -sdk ${_metal_sdk} metal ${_metal_sdk_version_arg} -o ${MSL_FILE_PATH}.ir -c ${MSL_FILE_PATH} -D__air__ -frecord-sources -gline-tables-only
             DEPENDS ${MSL_FILE_PATH}
         )
         add_custom_command(

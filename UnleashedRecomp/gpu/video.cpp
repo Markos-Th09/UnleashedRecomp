@@ -766,6 +766,17 @@ static void DestructTempResources()
 static std::thread::id g_presentThreadId = std::this_thread::get_id();
 static std::atomic<bool> g_readyForCommands;
 static std::atomic<bool> g_appSuspended = false;
+static std::atomic<bool> g_renderThreadParked = false;
+static bool g_pendingWaitOnSwapChain = true;
+static bool g_skipNextSwapChainDrain = false;
+static std::atomic<uint32_t> g_resumeFenceGrace = 0;
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if TARGET_OS_IPHONE
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 PPC_FUNC_IMPL(__imp__sub_824ECA00);
 PPC_FUNC(sub_824ECA00)
@@ -1574,12 +1585,23 @@ static void CreateImGuiBackend()
 
 static void CheckSwapChain()
 {
+    // Never touch the swap chain while suspended: the layer's drawables are
+    // invalid and acquiring would block or fail.
+    if (g_appSuspended.load(std::memory_order_acquire))
+    {
+        g_swapChainValid = false;
+        return;
+    }
+
     g_swapChain->setVsyncEnabled(Config::VSync);
     g_swapChainValid &= !g_swapChain->needsResize();
 
     if (!g_swapChainValid)
     {
-        Video::WaitForGPU();
+        if (g_skipNextSwapChainDrain)
+            g_skipNextSwapChainDrain = false;
+        else
+            Video::WaitForGPU();
         g_backBuffer->framebuffers.clear();
         g_swapChainValid = g_swapChain->resize();
         g_needsResize = g_swapChainValid;
@@ -1675,7 +1697,38 @@ static void BeginCommandList()
     commandList->setGraphicsDescriptorSet(g_samplerDescriptorSet.get(), 3);
 
     if (g_appSuspended.load(std::memory_order_relaxed)) {
-        g_appSuspended.wait(true, std::memory_order_acquire);
+        g_swapChainValid = false;
+#if TARGET_OS_IPHONE
+        // This is a consistent frame boundary: the executor handshake for the
+        // frame completed earlier, so the fences WaitForGPU blocks on are real
+        // in-flight GPU work with bounded completion. Drain here — never in the
+        // lifecycle handler.
+        g_pendingWaitOnSwapChain = false;
+        g_dirtyStates.viewport = true;
+        Video::WaitForGPU();
+
+        // The guest render loop runs on the UIKit main thread. While suspended,
+        // main must neither keep running guest code (the background scene-update
+        // transaction starves and the watchdog kills the app) nor block on a
+        // bare wait (the runloop starves and the wake-up notification can never
+        // be delivered). It has to sit inside the runloop, so the system can
+        // service its transactions, cleanly suspend the process, and deliver
+        // the foreground notification that clears the flag on resume.
+        while (g_appSuspended.load(std::memory_order_acquire))
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
+        // First frame after resume: force a resize so the stale drawable
+        // generation is dropped and reacquired. The GPU was already drained on
+        // the way into the suspend and nothing touched it while idling, so the
+        // resize must not drain again: at this point a freshly queued command
+        // list may not have reached the executor yet, and waiting on its fence
+        // here deadlocks the resume frame.
+        g_swapChainValid = false;
+        g_skipNextSwapChainDrain = true;
+        // Command lists that straddle the suspend can render into drawables
+        // whose present was skipped; their completion fences may never fire.
+        // Give the first frames after resume a pass on the pacing fence.
+        g_resumeFenceGrace.store(NUM_FRAMES, std::memory_order_release);
+#endif
     }
 
     g_readyForCommands = true;
@@ -2845,19 +2898,22 @@ static void ProcDrawImGui(const RenderCommand& cmd)
 // 3. Loading thread also waits on swap chain.
 // 4. Loading thread presents and quits.
 // 5. After the loading thread quits, application also presents.
-static bool g_pendingWaitOnSwapChain = true;
+// (g_pendingWaitOnSwapChain is declared near the suspend state at the top of the file.)
 
 void Video::HandleApplicationBackgroundState(bool isBackgrounded)
 {
     if (isBackgrounded)
     {
         g_appSuspended.store(true, std::memory_order_release);
-        g_readyForCommands.store(false, std::memory_order_release);
-        g_pendingWaitOnSwapChain = false;
-        g_swapChainValid = false;
-        g_dirtyStates.viewport = true;
 
-        Video::WaitForGPU();
+        // Nothing else may happen here. This runs inside a UIKit lifecycle
+        // callback on the main thread, and any unbounded wait (WaitForGPU
+        // blocks on a command fence the executor may not signal yet) hangs the
+        // callback until the scene-update watchdog kills the app. The actual
+        // drain and swap chain invalidation happen at the render loop's own
+        // suspend gate, which sits at a consistent frame boundary.
+        // g_readyForCommands is also deliberately left alone: stopping the
+        // executor would strand the guest thread on g_executedCommandList.
     } else {
         g_appSuspended.store(false, std::memory_order_release);
         g_appSuspended.notify_all();
@@ -2902,7 +2958,21 @@ void Video::Present()
         g_shouldPrecompilePipelines = false;
     }
 
+#if TARGET_OS_IPHONE
+    // This wait runs on the UIKit main thread. If the executor stalls around a
+    // suspend, a bare atomic wait would leave the runloop unserviced and the
+    // background scene-update watchdog kills the app — so while suspended,
+    // service the runloop between checks instead of sleeping blind.
+    while (!g_executedCommandList.load(std::memory_order_acquire))
+    {
+        if (g_appSuspended.load(std::memory_order_acquire))
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
+        else
+            g_executedCommandList.wait(false);
+    }
+#else
     g_executedCommandList.wait(false);
+#endif
     g_executedCommandList = false;
 
     if (g_swapChainValid)
@@ -2925,6 +2995,16 @@ void Video::Present()
 
     if (g_commandListStates[g_frame])
     {
+        uint32_t grace = g_resumeFenceGrace.load(std::memory_order_acquire);
+        if (grace != 0)
+        {
+            // See the resume path: fences of lists that straddled a suspend may
+            // never signal, so skip the pacing wait for the first frames back.
+            g_resumeFenceGrace.store(grace - 1, std::memory_order_release);
+            g_commandListStates[g_frame] = false;
+        }
+        else
+        {
         g_frameFenceProfiler.Begin();
         g_queue->waitForCommandFence(g_commandFences[g_frame].get());
         g_frameFenceProfiler.End();
@@ -2934,6 +3014,7 @@ void Video::Present()
         g_queryPools[g_frame]->queryResults();
         const uint64_t *frameTimestamps = g_queryPools[g_frame]->getResults();
         g_gpuFrameProfiler.Set(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+        }
     }
 
     g_dirtyStates = DirtyStates(true);

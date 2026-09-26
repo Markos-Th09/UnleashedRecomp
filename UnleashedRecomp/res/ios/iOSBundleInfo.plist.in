@@ -19,6 +19,8 @@
         <string>@IOS_BUNDLE_VERSION@</string>
         <key>MinimumOSVersion</key>
         <string>@IOS_DEPLOYMENT_TARGET@</string>
+        <key>CADisableMinimumFrameDurationOnPhone</key>
+        <true/>
         <key>UIDeviceFamily</key>
         <array>
             <integer>1</integer>

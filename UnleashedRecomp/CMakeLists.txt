@@ -484,7 +484,6 @@ set(UNLEASHED_RECOMP_LINK_LIBS
     fmt::fmt
     zstd::libzstd
     msdf-atlas-gen::msdf-atlas-gen
-    nfd::nfd
     o1heap
     XenonUtils
     SDL2::SDL2-static
@@ -495,6 +494,10 @@ set(UNLEASHED_RECOMP_LINK_LIBS
     CURL::libcurl
     plume
 )
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    list(APPEND UNLEASHED_RECOMP_LINK_LIBS nfd::nfd)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(PREPEND UNLEASHED_RECOMP_LINK_LIBS SDL2::SDL2main)

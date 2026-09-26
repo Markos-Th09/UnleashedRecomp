@@ -92,6 +92,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_compile_definitions(UNLEASHED_RECOMP_IOS)
+    set(UNLEASHED_RECOMP_IOS ON)
 endif()
 
 set(UNLEASHED_RECOMP_PRECOMPILED_HEADERS
@@ -191,8 +192,14 @@ set(UNLEASHED_RECOMP_UI_CXX_SOURCES
     "ui/message_window.cpp"
     "ui/options_menu.cpp"
     "ui/options_menu_thumbnails.cpp"
+    "ui/touch_controls.cpp"
     "ui/tv_static.cpp"
 )
+
+if(UNLEASHED_RECOMP_IOS)
+    list(APPEND UNLEASHED_RECOMP_UI_CXX_SOURCES "ui/file_picker_ios.mm")
+    list(APPEND UNLEASHED_RECOMP_UI_CXX_SOURCES "ui/touch_haptics_ios.mm")
+endif()
 
 set(UNLEASHED_RECOMP_INSTALL_CXX_SOURCES
     "install/installer.cpp"

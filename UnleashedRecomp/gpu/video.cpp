@@ -28,6 +28,7 @@
 #include <ui/options_menu.h>
 #include <ui/game_window.h>
 #include <ui/black_bar.h>
+#include <ui/touch_controls.h>
 #include <patches/aspect_ratio_patches.h>
 #include <user/config.h>
 #include <sdl_listener.h>
@@ -1429,6 +1430,10 @@ static void CreateImGuiBackend()
     OptionsMenu::Init();
     InstallerWizard::Init();
 
+#ifdef UNLEASHED_RECOMP_IOS
+    TouchControls::Init();
+#endif
+
     ImGui_ImplSDL2_InitForOther(GameWindow::s_pWindow);
 
 #ifdef ENABLE_IM_FONT_ATLAS_SNAPSHOT
@@ -2676,6 +2681,10 @@ static void DrawImGui()
     ButtonGuide::Draw();
     Fader::Draw();
     BlackBar::Draw();
+
+#ifdef UNLEASHED_RECOMP_IOS
+    TouchControls::Draw(float(width), float(height), mousePosOffsetX, mousePosOffsetY);
+#endif
 
     assert(ImGui::GetBackgroundDrawList()->_ClipRectStack.Size == 1 && "Some clip rects were not removed from the stack!");
 

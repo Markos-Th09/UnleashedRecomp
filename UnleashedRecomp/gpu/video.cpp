@@ -339,6 +339,10 @@ static std::unique_ptr<RenderCommandFence> g_commandFences[NUM_FRAMES];
 static std::unique_ptr<RenderQueryPool> g_queryPools[NUM_FRAMES];
 static bool g_commandListStates[NUM_FRAMES];
 
+static Mutex g_waitForGPUMutex;
+static std::unique_ptr<RenderCommandList> g_waitForGPUCommandList;
+static std::unique_ptr<RenderCommandFence> g_waitForGPUCommandFence;
+
 static Mutex g_copyMutex;
 static std::unique_ptr<RenderCommandQueue> g_copyQueue;
 static std::unique_ptr<RenderCommandList> g_copyCommandList;
@@ -767,6 +771,8 @@ static void DestructTempResources()
 static std::thread::id g_presentThreadId = std::this_thread::get_id();
 static std::atomic<bool> g_readyForCommands;
 static std::atomic<bool> g_appSuspended = false;
+
+static const std::thread::id g_eventThreadId = std::this_thread::get_id();
 
 PPC_FUNC_IMPL(__imp__sub_824ECA00);
 PPC_FUNC(sub_824ECA00)
@@ -1900,6 +1906,9 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
     for (auto& commandFence : g_commandFences)
         commandFence = g_device->createCommandFence();
 
+    g_waitForGPUCommandList = g_queue->createCommandList();
+    g_waitForGPUCommandFence = g_device->createCommandFence();
+
     for (auto& queryPool : g_queryPools)
         queryPool = g_device->createQueryPool(NUM_QUERIES);
 
@@ -2140,6 +2149,7 @@ static uint32_t g_waitForGPUCount = 0;
 
 void Video::WaitForGPU()
 {
+    std::lock_guard lock(g_waitForGPUMutex);
     g_waitForGPUCount++;
 
     // Wait for all queued frames to finish.
@@ -2153,10 +2163,10 @@ void Video::WaitForGPU()
     }
 
     // Execute an empty command list and wait for it to end to guarantee that any remaining presentation has finished.
-    g_commandLists[0]->begin();
-    g_commandLists[0]->end();
-    g_queue->executeCommandLists(g_commandLists[0].get(), g_commandFences[0].get());
-    g_queue->waitForCommandFence(g_commandFences[0].get());
+    g_waitForGPUCommandList->begin();
+    g_waitForGPUCommandList->end();
+    g_queue->executeCommandLists(g_waitForGPUCommandList.get(), g_waitForGPUCommandFence.get());
+    g_queue->waitForCommandFence(g_waitForGPUCommandFence.get());
 }
 
 static uint32_t CreateDevice(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, be<uint32_t>* a6)
@@ -2858,20 +2868,25 @@ static bool g_pendingWaitOnSwapChain = true;
 
 void Video::HandleApplicationBackgroundState(bool isBackgrounded)
 {
-    if (isBackgrounded)
-    {
-        g_appSuspended.store(true, std::memory_order_release);
-        g_readyForCommands.store(false, std::memory_order_release);
-        g_pendingWaitOnSwapChain = false;
-        g_swapChainValid = false;
-        g_dirtyStates.viewport = true;
+    if (g_appSuspended.exchange(isBackgrounded, std::memory_order_acq_rel) != isBackgrounded)
+        LOGFN("Application {} the background.", isBackgrounded ? "entered" : "left");
+}
 
-        Video::WaitForGPU();
-    } else {
-        g_appSuspended.store(false, std::memory_order_release);
-        g_appSuspended.notify_all();
+// iOS doesn't allow GPU work in the background, so stop presenting new frames until the app is back.
+static void WaitWhileApplicationSuspended()
+{
+    while (g_appSuspended.load(std::memory_order_acquire))
+    {
+        if (std::this_thread::get_id() == g_eventThreadId)
+        {
+            SDL_PumpEvents();
+            SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 }
+
 
 void Video::WaitOnSwapChain()
 {
@@ -2893,6 +2908,7 @@ static std::atomic<bool> g_executedCommandList;
 
 void Video::Present()
 {
+    WaitWhileApplicationSuspended();
     g_readyForCommands = false;
 
     RenderCommand cmd;
